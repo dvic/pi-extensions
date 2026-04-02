@@ -378,7 +378,7 @@ export default function (pi: ExtensionAPI) {
 
 					if (target === "window") {
 						// Open in a new tmux window
-						const newWindowArgs = ["new-window", "-d", "-P", "-F", "#{pane_id}\t#{window_id}"];
+						const newWindowArgs = ["new-window", "-d", "-n", forkName, "-P", "-F", "#{pane_id}\t#{window_id}"];
 						if (cwd) newWindowArgs.push("-c", cwd);
 
 						const result = await pi.exec("tmux", newWindowArgs);
