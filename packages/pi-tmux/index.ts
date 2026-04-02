@@ -81,11 +81,11 @@ export default function (pi: ExtensionAPI) {
 		return myWindowId;
 	}
 
+	// Search session-wide so window forks are also found
 	async function findPane(name: string): Promise<PaneInfo | null> {
 		const result = await pi.exec("tmux", [
 			"list-panes",
-			"-t",
-			requireWindowTarget(),
+			"-s",
 			"-F",
 			"#{pane_id}\t#{@pi_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_dead}",
 		]);
@@ -100,14 +100,12 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
-	async function listAllPanes(): Promise<PaneInfo[]> {
-		const result = await pi.exec("tmux", [
-			"list-panes",
-			"-t",
-			requireWindowTarget(),
-			"-F",
-			"#{pane_id}\t#{@pi_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_dead}",
-		]);
+	// windowOnly: true for layout decisions (only same window), false for list/discovery
+	async function listAllPanes(windowOnly = true): Promise<PaneInfo[]> {
+		const args = windowOnly
+			? ["list-panes", "-t", requireWindowTarget(), "-F", "#{pane_id}\t#{@pi_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_dead}"]
+			: ["list-panes", "-s", "-F", "#{pane_id}\t#{@pi_name}\t#{pane_current_command}\t#{pane_pid}\t#{pane_dead}"];
+		const result = await pi.exec("tmux", args);
 		if (result.code !== 0) return [];
 
 		const panes: PaneInfo[] = [];
@@ -156,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 				description: "Action to perform",
 			}),
 			pane: Type.Optional(Type.String({ description: "Pane name (required for run/read/send/stop)" })),
-			name: Type.Optional(Type.String({ description: "Display name for the forked session (for fork action, auto-generated if omitted)" })),
+			name: Type.Optional(Type.String({ description: "Name for the forked session (required for fork action)" })),
 			command: Type.Optional(Type.String({ description: "Shell command to run (for run action)" })),
 			keys: Type.Optional(
 				Type.String({
@@ -338,7 +336,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				case "list": {
-					const panes = await listAllPanes();
+					const panes = await listAllPanes(false);
 
 					if (panes.length === 0) {
 						return {
@@ -363,7 +361,14 @@ export default function (pi: ExtensionAPI) {
 
 				case "fork": {
 					const { name, target, prompt, cwd, position } = params;
-					const forkName = name || `fork-${Date.now().toString(36)}`;
+					if (!name) throw new Error("'name' is required for fork");
+					const forkName = name;
+
+					// Check for duplicate name across the entire session
+					const duplicate = await findPane(forkName);
+					if (duplicate) {
+						throw new Error(`A pane named '${forkName}' already exists. Choose a different name.`);
+					}
 
 					const sessionFile = ctx.sessionManager.getSessionFile();
 					if (!sessionFile) throw new Error("No active session file to fork from.");
@@ -406,11 +411,6 @@ export default function (pi: ExtensionAPI) {
 						};
 					} else {
 						// Open in a pane (reuse run's layout logic)
-						const existing = await findPane(forkName);
-						if (existing) {
-							await pi.exec("tmux", ["kill-pane", "-t", existing.paneId]);
-						}
-
 						const allOtherPanes = await listAllPanes();
 						let splitFlag: string;
 						let splitTarget: string | null = null;
