@@ -18,7 +18,7 @@ Or add manually to `~/.pi/agent/settings.json`:
 
 ## What it does
 
-Gives the agent a `tmux` tool with five actions:
+Gives the agent a `tmux` tool with six actions:
 
 | Action | Description |
 |--------|-------------|
@@ -27,8 +27,19 @@ Gives the agent a `tmux` tool with five actions:
 | **send** | Send keys (`C-c`, `Enter`, etc.) or literal text to a pane |
 | **stop** | Kill a named pane |
 | **list** | List all managed panes |
+| **fork** | Fork the current pi session into a new pane or window |
 
 The agent uses `tmux run` for long-running processes (dev servers, file watchers, builds) and `bash` for short-lived commands. This keeps the agent unblocked while background processes run.
+
+### Fork
+
+The `fork` action spawns a new pi instance with the current session's full context. Useful for delegating subtasks or exploring alternative approaches without losing your current conversation.
+
+- **target: "pane"** (default) — opens in a split pane alongside pi
+- **target: "window"** — opens in a separate tmux window
+- **prompt** — optional initial prompt to auto-send to the forked session
+
+Example: "fork this session in a new window and ask it to run the tests"
 
 ## Layout
 

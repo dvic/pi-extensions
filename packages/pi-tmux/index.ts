@@ -7,6 +7,7 @@
  *   send  — send keys to a named pane (C-c, Enter, q, etc.)
  *   stop  — kill a named pane
  *   list  — list all managed panes
+ *   fork  — fork current pi session into a new pane or window
  *
  * Panes are tagged with @pi_name tmux user options for discovery.
  * The tool is disabled when not running inside tmux.
@@ -143,17 +144,19 @@ export default function (pi: ExtensionAPI) {
 		label: "tmux",
 		description:
 			"Manage tmux panes for long-running processes (dev servers, watchers, etc). " +
-			"Actions: run (start command in named pane), read (capture output), send (send keys like C-c), stop (kill pane), list (show panes).",
+			"Actions: run (start command in named pane), read (capture output), send (send keys like C-c), stop (kill pane), list (show panes), fork (fork current pi session into a new pane or window).",
 		promptGuidelines: [
 			"Use `tmux` run for long-running processes (dev servers, watchers, builds) instead of `bash`.",
 			"Use `bash` only for short-lived commands that complete quickly.",
 			"Layout: pi runs on the left. Worker panes are created on the right, stacked vertically. First pane splits right from pi, additional panes automatically stack below existing ones.",
+			"Use `tmux` fork to spawn a new pi agent session forked from the current session. Use target 'window' for a separate tmux window, or 'pane' (default) for a side-by-side split. Optionally pass a prompt to auto-send.",
 		],
 		parameters: Type.Object({
-			action: StringEnum(["run", "read", "send", "stop", "list"] as const, {
+			action: StringEnum(["run", "read", "send", "stop", "list", "fork"] as const, {
 				description: "Action to perform",
 			}),
 			pane: Type.Optional(Type.String({ description: "Pane name (required for run/read/send/stop)" })),
+			name: Type.Optional(Type.String({ description: "Display name for the forked session (for fork action, auto-generated if omitted)" })),
 			command: Type.Optional(Type.String({ description: "Shell command to run (for run action)" })),
 			keys: Type.Optional(
 				Type.String({
@@ -177,9 +180,17 @@ export default function (pi: ExtensionAPI) {
 					description: "Pane position (for run action, default: right)",
 				}),
 			),
+			target: Type.Optional(
+				StringEnum(["pane", "window"] as const, {
+					description: "Where to open the forked session (for fork action, default: pane)",
+				}),
+			),
+			prompt: Type.Optional(
+				Type.String({ description: "Initial prompt to send to the forked session (for fork action)" }),
+			),
 		}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!inTmux) {
 				throw new Error("Not running inside tmux.");
 			}
@@ -350,6 +361,106 @@ export default function (pi: ExtensionAPI) {
 					};
 				}
 
+				case "fork": {
+					const { name, target, prompt, cwd, position } = params;
+					const forkName = name || `fork-${Date.now().toString(36)}`;
+
+					const sessionFile = ctx.sessionManager.getSessionFile();
+					if (!sessionFile) throw new Error("No active session file to fork from.");
+
+					// Build pi command
+					const piCmd = `pi --fork ${JSON.stringify(sessionFile)}`;
+
+					if (target === "window") {
+						// Open in a new tmux window
+						const newWindowArgs = ["new-window", "-d", "-P", "-F", "#{pane_id}\t#{window_id}"];
+						if (cwd) newWindowArgs.push("-c", cwd);
+
+						const result = await pi.exec("tmux", newWindowArgs);
+						if (result.code !== 0) throw new Error(`new-window failed: ${result.stderr}`);
+
+						const [newPaneId, newWindowId] = result.stdout.trim().split("\t");
+
+						// Tag with name
+						await pi.exec("tmux", ["set-option", "-p", "-t", newPaneId, "@pi_name", forkName]);
+
+						// Send pi fork command
+						await pi.exec("tmux", ["send-keys", "-l", "-t", newPaneId, piCmd]);
+						await pi.exec("tmux", ["send-keys", "-t", newPaneId, "Enter"]);
+
+						// Wait for pi to boot, then send prompt if provided
+						if (prompt) {
+							await new Promise((r) => setTimeout(r, 3000));
+							await pi.exec("tmux", ["send-keys", "-l", "-t", newPaneId, prompt]);
+							await pi.exec("tmux", ["send-keys", "-t", newPaneId, "Enter"]);
+						}
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Forked session into new window '${forkName}' (${newWindowId})${prompt ? ` with prompt: ${prompt}` : ""}`,
+								},
+							],
+							details: { action: "fork", name: forkName, target: "window", windowId: newWindowId, prompt },
+						};
+					} else {
+						// Open in a pane (reuse run's layout logic)
+						const existing = await findPane(forkName);
+						if (existing) {
+							await pi.exec("tmux", ["kill-pane", "-t", existing.paneId]);
+						}
+
+						const allOtherPanes = await listAllPanes();
+						let splitFlag: string;
+						let splitTarget: string | null = null;
+
+						if (position === "right") {
+							splitFlag = "-h";
+						} else if (position === "bottom") {
+							splitFlag = "-v";
+						} else if (allOtherPanes.length > 0) {
+							splitFlag = "-v";
+							splitTarget = allOtherPanes[allOtherPanes.length - 1].paneId;
+						} else {
+							splitFlag = "-h";
+						}
+
+						const splitArgs = ["split-window", "-d", splitFlag, "-P", "-F", "#{pane_id}"];
+						splitArgs.push("-t", splitTarget ?? myPaneId ?? requireWindowTarget());
+						if (cwd) splitArgs.push("-c", cwd);
+
+						const result = await pi.exec("tmux", splitArgs);
+						if (result.code !== 0) throw new Error(`split-window failed: ${result.stderr}`);
+
+						const newPaneId = result.stdout.trim();
+
+						// Tag with name
+						await pi.exec("tmux", ["set-option", "-p", "-t", newPaneId, "@pi_name", forkName]);
+
+						// Send pi fork command
+						await pi.exec("tmux", ["send-keys", "-l", "-t", newPaneId, piCmd]);
+						await pi.exec("tmux", ["send-keys", "-t", newPaneId, "Enter"]);
+
+						// Wait for pi to boot, then send prompt if provided
+						if (prompt) {
+							await new Promise((r) => setTimeout(r, 3000));
+							await pi.exec("tmux", ["send-keys", "-l", "-t", newPaneId, prompt]);
+							await pi.exec("tmux", ["send-keys", "-t", newPaneId, "Enter"]);
+						}
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Forked session into pane '${forkName}' (${newPaneId})${prompt ? ` with prompt: ${prompt}` : ""}`,
+								},
+							],
+							details: { action: "fork", name: forkName, target: "pane", paneId: newPaneId, prompt },
+						};
+					}
+				}
+
 				default:
 					throw new Error(`Unknown action: ${action}`);
 			}
@@ -362,10 +473,16 @@ export default function (pi: ExtensionAPI) {
 			let text = theme.fg("toolTitle", theme.bold("tmux "));
 			text += theme.fg("accent", action);
 
-			if (args.pane) text += theme.fg("muted", ` ${args.pane}`);
-			if (args.command) text += theme.fg("dim", ` › ${args.command}`);
-			if (args.text) text += theme.fg("dim", ` › "${args.text}"`);
-			if (args.keys) text += theme.fg("dim", ` › ${args.keys}`);
+			if (args.action === "fork") {
+				if (args.name) text += theme.fg("muted", ` ${args.name}`);
+				text += theme.fg("dim", ` › ${args.target || "pane"}`);
+				if (args.prompt) text += theme.fg("dim", ` › "${args.prompt}"`);
+			} else {
+				if (args.pane) text += theme.fg("muted", ` ${args.pane}`);
+				if (args.command) text += theme.fg("dim", ` › ${args.command}`);
+				if (args.text) text += theme.fg("dim", ` › "${args.text}"`);
+				if (args.keys) text += theme.fg("dim", ` › ${args.keys}`);
+			}
 
 			return new Text(text, 0, 0);
 		},
@@ -424,6 +541,13 @@ export default function (pi: ExtensionAPI) {
 						return `${dot} ${label} ${theme.fg("dim", p.command)}${extra}`;
 					});
 					return new Text(lines.join("\n"), 0, 0);
+				}
+
+				case "fork": {
+					let t = theme.fg("success", `⑂ ${details.name}`);
+					t += theme.fg("dim", ` › ${details.target}`);
+					if (details.prompt) t += theme.fg("dim", ` › "${details.prompt}"`);
+					return new Text(t, 0, 0);
 				}
 
 				default: {
