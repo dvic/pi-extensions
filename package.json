@@ -5,6 +5,21 @@
   "workspaces": [
     "packages/*"
   ],
+  "pi": {
+    "extensions": [
+      "packages/pi-tmux",
+      "packages/pi-spar",
+      "packages/pi-ghost",
+      "packages/pi-ghostty-theme-sync",
+      "packages/pi-goal",
+      "packages/pi-handoff",
+      "packages/pi-minimal-footer",
+      "packages/pi-session-recall",
+      "packages/pi-sketch",
+      "packages/pi-web-browse",
+      "packages/pi-flicker"
+    ]
+  },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.63.0",
     "@mariozechner/pi-ai": "^0.63.0",
